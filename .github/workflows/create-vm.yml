@@ -1,0 +1,53 @@
+      - name: Run instance creation script (Always Free enforced)
+        id: create
+        env:
+          COMPARTMENT_OCID: ${{ secrets.COMPARTMENT_OCID }}
+          AD: ${{ secrets.AVAILABILITY_DOMAIN }}
+          IMAGE_OCID: ${{ secrets.IMAGE_OCID }}        # ARM image OCID
+          SUBNET_OCID: ${{ secrets.SUBNET_OCID }}
+        run: |
+          set -euo pipefail
+          # Parameters that enforce Always-Free limits
+          SHAPE="VM.Standard.A1.Flex"
+          SHAPE_CONFIG='{"ocpus":4,"memoryInGBs":24}'
+          BOOT_VOL=50
+
+          echo "Launching Always-Free A1 Flex instance (4 OCPUs, 24GB)..."
+          oci compute instance launch \
+            --compartment-id "$COMPARTMENT_OCID" \
+            --availability-domain "$AD" \
+            --image-id "$IMAGE_OCID" \
+            --subnet-id "$SUBNET_OCID" \
+            --shape "$SHAPE" \
+            --shape-config "$SHAPE_CONFIG" \
+            --boot-volume-size-in-gbs $BOOT_VOL \
+            --assign-public-ip true \
+            --display-name "a1-free-automated-$(date +%s)" \
+            --output json > launch.json || true
+
+          cat launch.json
+
+          # Check for API error
+          if jq -e '.code? // empty' launch.json >/dev/null; then
+            echo "API returned an error during launch."
+            echo "created=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Extract instance OCID and shape info
+          INSTANCE_OCID=$(jq -r '.data.id // .id' launch.json)
+          LAUNCHED_SHAPE=$(jq -r '.data.shape // .shape' launch.json)
+          # If shape-config is present in response, validate ocpus and memory
+          OCPS=$(jq -r '.data.shapeConfig.ocpus // .shapeConfig.ocpus // empty' launch.json || echo "")
+          MEM=$(jq -r '.data.shapeConfig.memoryInGBs // .shapeConfig.memoryInGBs // empty' launch.json || echo "")
+
+          echo "Instance OCID: $INSTANCE_OCID"
+          echo "Shape: $LAUNCHED_SHAPE"
+          echo "OCPUs: ${OCPS:-unknown} MemoryGB: ${MEM:-unknown}"
+
+          # Validate Always-Free constraints
+          if [ "$LAUNCHED_SHAPE" = "VM.Standard.A1.Flex" ] && [ -n "$OCPS" ] && [ -n "$MEM" ] && [ "$OCPS" -le 4 ] && [ "$MEM" -le 24 ]; then
+            echo "created=true" >> $GITHUB_OUTPUT
+          else
+            echo "created=false" >> $GITHUB_OUTPUT
+          fi
